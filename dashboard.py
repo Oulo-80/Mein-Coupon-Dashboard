@@ -5,15 +5,11 @@ import plotly.express as px
 # Grundkonfiguration der Seite
 st.set_page_config(page_title="Mücke Coupon Dashboard", layout="wide", initial_sidebar_state="expanded")
 
-# --- STYLING (Korrigiert) ---
+# --- STYLING ---
 st.markdown("""
     <style>
-    .main {
-        background-color: #f8f9fa;
-    }
-    div[data-testid="stMetricValue"] {
-        font-size: 1.8rem;
-    }
+    .main { background-color: #f8f9fa; }
+    div[data-testid="stMetricValue"] { font-size: 1.8rem; color: #1f77b4; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -21,12 +17,11 @@ st.title("📊 Mücke Aktionsdashboard")
 st.subheader("Couponauswertung ab Q3 2024")
 st.markdown("---")
 
-# --- UPLOAD FUNKTION (Sidebar) ---
+# --- UPLOAD FUNKTION ---
 st.sidebar.header("Daten-Upload")
 uploaded_file = st.sidebar.file_uploader("Hello again CSV Datei hochladen", type="csv")
 
 def load_and_clean_data(file):
-    # Fehlerbehebung für Encoding & Dateizugriff
     try:
         file.seek(0)
         df = pd.read_csv(file, sep=";", skiprows=3, decimal=",", encoding='utf-8')
@@ -34,86 +29,69 @@ def load_and_clean_data(file):
         file.seek(0)
         df = pd.read_csv(file, sep=";", skiprows=3, decimal=",", encoding='iso-8859-1')
     
-    # Bereinigung der Struktur
     df = df.dropna(axis=1, how='all')
     df.columns = [c.strip() for c in df.columns]
     
-    # Zahlenformate bereinigen (Punkte entfernen, Euro-Zeichen weg)
-    cols_to_fix = ['Aktivierungen', 'Einlösungen', 'Umsatz']
-    for col in cols_to_fix:
-        if col in df.columns:
-            # Konvertierung zu String, um sicher zu gehen, dann Säuberung
-            df[col] = df[col].astype(str).str.replace('.', '', regex=False)
-            df[col] = df[col].str.replace('€', '', regex=False)
-            df[col] = df[col].str.replace(',', '.', regex=False).str.strip()
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+    # --- SPEZIELLE REINIGUNG FÜR DEN UMSATZ ---
+    def clean_currency(value):
+        if pd.isna(value) or value == "" or "DIV/0" in str(value):
+            return 0.0
+        s = str(value).replace('€', '').strip()
+        # Wichtig: Wenn ein Punkt für Tausender UND ein Komma für Cent da ist:
+        if '.' in s and ',' in s:
+            s = s.replace('.', '') # Tausenderpunkt weg
+            s = s.replace(',', '.') # Dezimalkomma zu Punkt
+        # Wenn nur ein Punkt da ist (z.B. 8.150.458)
+        elif '.' in s and ',' not in s:
+            s = s.replace('.', '')
+        # Wenn nur ein Komma da ist
+        elif ',' in s:
+            s = s.replace(',', '.')
+        return pd.to_numeric(s, errors='coerce')
 
-    # --- ZUSÄTZLICHE KENNZAHLEN ---
-    # Berechnung der Conversion Rate (Einlöser vs Aktivierer) [cite: 2, 3]
-    df['Conversion_Rate_%'] = (df['Einlösungen'] / df['Aktivierungen'] * 100).round(2)
-    # Durchschnittlicher Umsatz pro eingelöstem Coupon [cite: 2]
-    df['Umsatz_pro_Einloesung'] = (df['Umsatz'] / df['Einlösungen']).round(2)
+    # Spalten bereinigen
+    if 'Umsatz' in df.columns:
+        df['Umsatz'] = df['Umsatz'].apply(clean_currency)
+    
+    for col in ['Aktivierungen', 'Einlösungen']:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.replace('.', '', regex=False).str.strip()
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+    # Kennzahlen
+    df['Conversion_Rate_%'] = (df['Einlösungen'] / df['Aktivierungen'] * 100).fillna(0).round(2)
+    df['Umsatz_pro_Einloesung'] = (df['Umsatz'] / df['Einlösungen']).fillna(0).round(2)
     
     return df
 
 if uploaded_file is not None:
     data = load_and_clean_data(uploaded_file)
-
-    # --- FILTER (Sidebar) ---
-    st.sidebar.markdown("---")
-    st.sidebar.header("Filter & Ansicht")
     
-    # Filter für die letzten 10 Tage [cite: 1]
+    # Filter
     status_options = data['Aktiv (letzte 10 Tage)'].unique().tolist()
-    selected_status = st.sidebar.multiselect("Status 'Aktiv (letzte 10 Tage)':", 
-                                            options=status_options, 
-                                            default=status_options)
-    
+    selected_status = st.sidebar.multiselect("Status 'Aktiv':", options=status_options, default=status_options)
     filtered_df = data[data['Aktiv (letzte 10 Tage)'].isin(selected_status)]
 
-    # --- KPI DASHBOARD ---
+    # KPIs
     total_rev = filtered_df['Umsatz'].sum()
     total_red = filtered_df['Einlösungen'].sum()
-    avg_conv = filtered_df['Conversion_Rate_%'].mean()
-
-    m1, m2, m3, m4 = st.columns(4)
-    # Anzeige des Gesamtumsatzes (z.B. 8,15 Mio € für die Geschenkkarte) [cite: 2]
+    
+    m1, m2, m3 = st.columns(3)
+    # Anzeige mit Tausendertrennung für Deutschland
     m1.metric("Gesamtumsatz", f"{total_rev:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
-    # Summe der Einlösungen (z.B. über 56.000 bei Top-Aktionen) [cite: 2]
     m2.metric("Einlösungen", f"{int(total_red):,}".replace(",", "."))
-    m3.metric("Ø Conversion Rate", f"{avg_conv:.1f} %")
-    m4.metric("Anzahl Aktionen", len(filtered_df))
+    m3.metric("Ø Conversion", f"{filtered_df['Conversion_Rate_%'].mean():.1f} %")
 
-    st.markdown("---")
+    # Visualisierung
+    st.subheader("Top 10 Aktionen nach Umsatz")
+    # Wir filtern 0-Werte aus, damit der Chart sauber ist
+    chart_data = filtered_df[filtered_df['Umsatz'] > 0].nlargest(10, 'Umsatz')
+    if not chart_data.empty:
+        fig = px.bar(chart_data, x='Umsatz', y='bounty_name', orientation='h', 
+                     color='Umsatz', color_continuous_scale='Greens', text_auto='.3s')
+        st.plotly_chart(fig, use_container_width=True)
 
-    # --- VISUALISIERUNGEN ---
-    col_l, col_r = st.columns(2)
-
-    with col_l:
-        st.subheader("Top Umsatz-Bringer")
-        # Zeigt die umsatzstärksten Coupons wie z.B. 20% auf gesamten Einkauf [cite: 2]
-        fig_rev = px.bar(filtered_df.nlargest(10, 'Umsatz'), 
-                         x='Umsatz', y='bounty_name', 
-                         orientation='h', 
-                         color='Umsatz', 
-                         color_continuous_scale='Blues')
-        fig_rev.update_layout(yaxis={'categoryorder':'total ascending'})
-        st.plotly_chart(fig_rev, use_container_width=True)
-
-    with col_r:
-        st.subheader("Einlöse-Qualität")
-        # Vergleich von Conversion Rate und Durchschnittsumsatz [cite: 2, 3]
-        fig_scat = px.scatter(filtered_df, 
-                             x='Conversion_Rate_%', 
-                             y='Umsatz_pro_Einloesung', 
-                             size='Einlösungen', 
-                             hover_name='bounty_name', 
-                             color='Aktiv (letzte 10 Tage)')
-        st.plotly_chart(fig_scat, use_container_width=True)
-
-    # --- TABELLE ---
-    st.subheader("Alle Daten im Überblick")
-    st.dataframe(filtered_df.sort_values(by='Umsatz', ascending=False), use_container_width=True)
-
+    st.subheader("Daten-Check")
+    st.dataframe(filtered_df[['bounty_name', 'Umsatz', 'Einlösungen', 'Conversion_Rate_%']])
 else:
-    st.info("Bitte lade die Datei 'Hello again Couponauswertung.csv' links hoch.")
+    st.info("Bitte lade die Datei hoch.")

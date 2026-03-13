@@ -1,97 +1,73 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
+import re
 
-# Grundkonfiguration der Seite
-st.set_page_config(page_title="Mücke Coupon Dashboard", layout="wide", initial_sidebar_state="expanded")
-
-# --- STYLING ---
-st.markdown("""
-    <style>
-    .main { background-color: #f8f9fa; }
-    div[data-testid="stMetricValue"] { font-size: 1.8rem; color: #1f77b4; }
-    </style>
-    """, unsafe_allow_html=True)
+st.set_page_config(page_title="Mücke Coupon Dashboard", layout="wide")
 
 st.title("📊 Mücke Aktionsdashboard")
-st.subheader("Couponauswertung ab Q3 2024")
-st.markdown("---")
 
-# --- UPLOAD FUNKTION ---
-st.sidebar.header("Daten-Upload")
-uploaded_file = st.sidebar.file_uploader("Hello again CSV Datei hochladen", type="csv")
+# Dateiupload
+uploaded_file = st.sidebar.file_uploader("CSV Datei hochladen", type="csv")
 
-def load_and_clean_data(file):
+def clean_value_to_float(val):
+    """Reinigt Strings wie '8.150.458 €' zu einer Zahl."""
+    if pd.isna(val) or val == "": return 0.0
+    # Alles entfernen außer Ziffern und das Komma für die Nachkommastellen
+    cleaned = re.sub(r'[^\d,]', '', str(val))
+    if ',' in cleaned:
+        cleaned = cleaned.replace(',', '.')
     try:
-        file.seek(0)
-        df = pd.read_csv(file, sep=";", skiprows=3, decimal=",", encoding='utf-8')
-    except Exception:
-        file.seek(0)
-        df = pd.read_csv(file, sep=";", skiprows=3, decimal=",", encoding='iso-8859-1')
-    
-    df = df.dropna(axis=1, how='all')
-    df.columns = [c.strip() for c in df.columns]
-    
-    # --- SPEZIELLE REINIGUNG FÜR DEN UMSATZ ---
-    def clean_currency(value):
-        if pd.isna(value) or value == "" or "DIV/0" in str(value):
-            return 0.0
-        s = str(value).replace('€', '').strip()
-        # Wichtig: Wenn ein Punkt für Tausender UND ein Komma für Cent da ist:
-        if '.' in s and ',' in s:
-            s = s.replace('.', '') # Tausenderpunkt weg
-            s = s.replace(',', '.') # Dezimalkomma zu Punkt
-        # Wenn nur ein Punkt da ist (z.B. 8.150.458)
-        elif '.' in s and ',' not in s:
-            s = s.replace('.', '')
-        # Wenn nur ein Komma da ist
-        elif ',' in s:
-            s = s.replace(',', '.')
-        return pd.to_numeric(s, errors='coerce')
-
-    # Spalten bereinigen
-    if 'Umsatz' in df.columns:
-        df['Umsatz'] = df['Umsatz'].apply(clean_currency)
-    
-    for col in ['Aktivierungen', 'Einlösungen']:
-        if col in df.columns:
-            df[col] = df[col].astype(str).str.replace('.', '', regex=False).str.strip()
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
-    # Kennzahlen
-    df['Conversion_Rate_%'] = (df['Einlösungen'] / df['Aktivierungen'] * 100).fillna(0).round(2)
-    df['Umsatz_pro_Einloesung'] = (df['Umsatz'] / df['Einlösungen']).fillna(0).round(2)
-    
-    return df
+        return float(cleaned)
+    except:
+        return 0.0
 
 if uploaded_file is not None:
-    data = load_and_clean_data(uploaded_file)
+    # 1. Datei einlesen (ISO-8859-1 ist bei Excel-CSVs am sichersten)
+    try:
+        uploaded_file.seek(0)
+        df = pd.read_csv(uploaded_file, sep=";", skiprows=3, encoding='iso-8859-1')
+    except:
+        uploaded_file.seek(0)
+        df = pd.read_csv(uploaded_file, sep=";", skiprows=3, encoding='utf-8')
+
+    # Spalten säubern
+    df.columns = [c.strip() for c in df.columns]
     
-    # Filter
-    status_options = data['Aktiv (letzte 10 Tage)'].unique().tolist()
-    selected_status = st.sidebar.multiselect("Status 'Aktiv':", options=status_options, default=status_options)
-    filtered_df = data[data['Aktiv (letzte 10 Tage)'].isin(selected_status)]
-
-    # KPIs
-    total_rev = filtered_df['Umsatz'].sum()
-    total_red = filtered_df['Einlösungen'].sum()
+    # 2. Daten umwandeln
+    if 'Umsatz' in df.columns:
+        # Wir speichern den Originalwert für das Debugging
+        df['Umsatz_Original'] = df['Umsatz'] 
+        df['Umsatz'] = df['Umsatz'].apply(clean_value_to_float)
     
-    m1, m2, m3 = st.columns(3)
-    # Anzeige mit Tausendertrennung für Deutschland
-    m1.metric("Gesamtumsatz", f"{total_rev:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
-    m2.metric("Einlösungen", f"{int(total_red):,}".replace(",", "."))
-    m3.metric("Ø Conversion", f"{filtered_df['Conversion_Rate_%'].mean():.1f} %")
+    if 'Einlösungen' in df.columns:
+        df['Einlösungen'] = df['Einlösungen'].apply(clean_value_to_float)
+    
+    if 'Aktivierungen' in df.columns:
+        df['Aktivierungen'] = df['Aktivierungen'].apply(clean_value_to_float)
 
-    # Visualisierung
-    st.subheader("Top 10 Aktionen nach Umsatz")
-    # Wir filtern 0-Werte aus, damit der Chart sauber ist
-    chart_data = filtered_df[filtered_df['Umsatz'] > 0].nlargest(10, 'Umsatz')
-    if not chart_data.empty:
-        fig = px.bar(chart_data, x='Umsatz', y='bounty_name', orientation='h', 
-                     color='Umsatz', color_continuous_scale='Greens', text_auto='.3s')
-        st.plotly_chart(fig, use_container_width=True)
+    # 3. Filter
+    if 'Aktiv (letzte 10 Tage)' in df.columns:
+        status_filter = st.sidebar.multiselect("Status:", df['Aktiv (letzte 10 Tage)'].unique(), default=df['Aktiv (letzte 10 Tage)'].unique())
+        df = df[df['Aktiv (letzte 10 Tage)'].isin(status_filter)]
 
-    st.subheader("Daten-Check")
-    st.dataframe(filtered_df[['bounty_name', 'Umsatz', 'Einlösungen', 'Conversion_Rate_%']])
+    # 4. KPIs anzeigen
+    total_umsatz = df['Umsatz'].sum()
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Gesamtumsatz (berechnet)", f"{total_umsatz:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
+    with col2:
+        st.metric("Anzahl Zeilen", len(df))
+
+    # 5. DEBUG-BEREICH (Nur sichtbar, wenn Umsatz 0 ist)
+    if total_umsatz == 0:
+        st.error("⚠️ Der Umsatz wird mit 0 berechnet. Prüfe hier die Rohdaten:")
+        st.write(df[['bounty_name', 'Umsatz_Original', 'Umsatz']].head(10))
+    else:
+        st.success("✅ Daten erfolgreich geladen!")
+        # Einfache Tabelle der Top-Aktionen
+        st.subheader("Top 10 Aktionen nach Umsatz")
+        st.dataframe(df.nlargest(10, 'Umsatz')[['bounty_name', 'Umsatz', 'Einlösungen']])
+
 else:
     st.info("Bitte lade die Datei hoch.")
